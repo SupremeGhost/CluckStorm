@@ -8,25 +8,23 @@ using UnityEngine.UI;
 using XtremeFPS.WeaponSystem.Pickup;
 using XtremeFPS.Interfaces;
 
-namespace CluckStorm.Player
+namespace XtremeFPS.FPSController
 {
-    [RequireComponent(typeof(Rigidbody))]
-    [RequireComponent(typeof(CapsuleCollider))]
+    [RequireComponent(typeof(CharacterController))]
     [RequireComponent(typeof(FPSInputManager))]
     [RequireComponent(typeof(AudioSource))]
-    [AddComponentMenu("CluckStorm/Chicken Controller")]
-    public class ChickenController : MonoBehaviour
+    [AddComponentMenu("Spoiled Unknown/XtremeFPS/First Person Controller")]
+    public class FirstPersonController : MonoBehaviour
     {
         #region Variables
         // Player
         public float transitionSpeed;
-        public float walkSpeed = 2f; // Intentionally slow
+        public float walkSpeed = 5f;
         public float walkSoundSpeed;
 
-        public Rigidbody Rigidbody { get; private set; }
-        private CapsuleCollider capsuleCollider;
+        public CharacterController CharacterController {  get; private set; }
         private FPSInputManager inputManager;
-        public PlayerMovementState MovementState { get; private set; }
+        public PlayerMovementState MovementState {  get; private set; }
         public enum PlayerMovementState
         {
             Sprinting,
@@ -42,7 +40,7 @@ namespace CluckStorm.Player
         public bool canPlayerSprint;
         public bool unlimitedSprinting;
         public bool isSprintHold;
-        public float sprintSpeed = 4f; // Intentionally slow
+        public float sprintSpeed = 8f;
         public float sprintDuration = 8f;
         public float sprintCooldown = 8f;
         public Slider staminaBar;
@@ -55,11 +53,10 @@ namespace CluckStorm.Player
 
         // Gravity and Jumping
         public bool canJump;
-        public float jumpHeight = 1f;
+        public float jumpHeight = 2f;
+        public float gravitationalForce = 10f;
         public bool IsGrounded { get; private set; }
-        public float groundCheckDistance = 0.2f;
-        public LayerMask groundLayer;
-
+        public Vector3 jumpVelocity;
 
         // Crouching
         public bool canPlayerCrouch;
@@ -145,6 +142,7 @@ namespace CluckStorm.Player
 
         // Handling Physics
         public bool canPush;
+        public int pushLayersID;
         public float pushStrength = 1.1f;
 
         private float hRecoil = 0f;
@@ -162,10 +160,7 @@ namespace CluckStorm.Player
         {
             inputManager = FPSInputManager.Instance;
             audioSource = GetComponent<AudioSource>();
-            Rigidbody = GetComponent<Rigidbody>();
-            capsuleCollider = GetComponent<CapsuleCollider>();
-            
-            Rigidbody.freezeRotation = true;
+            CharacterController = GetComponent<CharacterController>();
 
             playerVirtualCamera.m_Lens.FieldOfView = FOV;
             AudioEffectSpeed = walkSoundSpeed;
@@ -176,20 +171,25 @@ namespace CluckStorm.Player
             StartCoroutine(PlayFootstepSounds());
 
             if (!canPlayerCrouch) return;
-            initialHeight = capsuleCollider.height;
+            initialHeight = CharacterController.height;
             initialCameraPosition = cameraFollow.transform.localPosition;
         }
 
         private void Update()
         {
             transitionDelta = Time.deltaTime * transitionSpeed;
+            Vector3 horizontalMovement = inputManager.moveDirection.x * targetSpeed * Time.deltaTime * transform.right +
+                  inputManager.moveDirection.y * targetSpeed * Time.deltaTime * transform.forward;
+            Vector3 verticalMovement = jumpVelocity.y * Time.deltaTime * transform.up;
+            CharacterController.Move(horizontalMovement + verticalMovement);
 
-            Vector3 localVelocity = transform.InverseTransformDirection(Rigidbody.linearVelocity);
+            Vector3 localVelocity = transform.InverseTransformDirection(CharacterController.velocity);
             isMoving = Mathf.Abs(localVelocity.z) > footstepSensitivity || Mathf.Abs(localVelocity.x) > footstepSensitivity;
 
             PlayerInputs();
             HandleZoom();
             HandleSprintCooldown();
+            GravityAndJump();
             HandleStateMachine();
             DetectSurfaceAndMovement();
             InteractionHandling();
@@ -201,16 +201,6 @@ namespace CluckStorm.Player
             cameraFollow.LookAt(FocusTarget());
         }
 
-        private void FixedUpdate()
-        {
-            GroundCheck();
-            
-            Vector3 horizontalMovement = (inputManager.moveDirection.x * transform.right + inputManager.moveDirection.y * transform.forward).normalized * targetSpeed;
-            Rigidbody.linearVelocity = new Vector3(horizontalMovement.x, Rigidbody.linearVelocity.y, horizontalMovement.z);
-            
-            HandleJumping();
-        }
-
         private void LateUpdate()
         {
             rotationY -= mouseDirectionY;
@@ -220,35 +210,24 @@ namespace CluckStorm.Player
             cameraFollow.localRotation = Quaternion.Euler(rotationY, 0f, 0f);
             inputManager.mouseDirection = Vector2.zero;
         }
-        
+
+        private void OnControllerColliderHit(ControllerColliderHit hit)
+        {
+            if (!canPush) return;
+
+            Rigidbody body = hit.collider.attachedRigidbody;
+            if (body == null || body.isKinematic) return;
+
+            LayerMask bodyLayerMask = 1 << body.gameObject.layer;
+            if ((bodyLayerMask & (1 << pushLayersID)) == 0) return;
+            if (hit.moveDirection.y < -0.3f) return;
+
+            Vector3 pushDirection = new Vector3(hit.moveDirection.x, 0.0f, hit.moveDirection.z);
+            body.AddForce(pushDirection * pushStrength, ForceMode.Impulse);
+        }
         #endregion
 
         #region Private Methods
-
-        private void GroundCheck()
-        {
-            bool wasPreviouslyGrounded = IsGrounded;
-            IsGrounded = Physics.CheckSphere(transform.position - new Vector3(0, capsuleCollider.height / 2, 0), groundCheckDistance, groundLayer, QueryTriggerInteraction.Ignore);
-            if (!wasPreviouslyGrounded && IsGrounded)
-            {
-                audioSource.PlayOneShot(landingAudioClip);
-            }
-        }
-
-        private void HandleJumping()
-        {
-             if (IsGrounded && inputManager.haveJumped && canJump && MovementState != PlayerMovementState.Crouching && MovementState != PlayerMovementState.Sliding)
-            {
-                Rigidbody.AddForce(Vector3.up * Mathf.Sqrt(jumpHeight * -2f * Physics.gravity.y), ForceMode.VelocityChange);
-                audioSource.PlayOneShot(jumpingAudioClip);
-            }
-        }
-
-        public void AddRecoilForce(Vector3 force)
-        {
-            Rigidbody.AddForce(force, ForceMode.Impulse);
-        }
-
         private void PlayerInputs()
         {
             mouseDirectionX = inputManager.mouseDirection.x * mouseSensitivity * Time.deltaTime + hRecoil;
@@ -336,7 +315,7 @@ namespace CluckStorm.Player
             if (unlimitedSprinting) return;
 
             if (MovementState == PlayerMovementState.Sprinting &&
-                Rigidbody.linearVelocity.magnitude > 0)
+                CharacterController.velocity.magnitude > 0)
             {
                 sprintRemaining -= 1 * Time.deltaTime;
                 if (sprintRemaining <= 0)
@@ -368,10 +347,8 @@ namespace CluckStorm.Player
                 }
             }
 
-            newHeight = Mathf.Lerp(capsuleCollider.height, targetHeight, transitionDelta);
-            capsuleCollider.height = newHeight;
-            capsuleCollider.center = new Vector3(0, newHeight/2, 0);
-
+            newHeight = Mathf.Lerp(CharacterController.height, targetHeight, transitionDelta);
+            CharacterController.height = newHeight;
 
             // Adjust the camera position based on the new height
             Vector3 halfHeightDifference = new Vector3(0, (initialHeight - newHeight) / 2, 0);
@@ -398,12 +375,12 @@ namespace CluckStorm.Player
 
         private bool CheckIfOnSlope()
         {
-            if (Physics.Raycast(transform.position, Vector3.down, out slopeHit, capsuleCollider.height * 0.5f + 0.3f))
+            if (Physics.Raycast(transform.position, Vector3.down, out slopeHit, CharacterController.height * 0.5f + 0.3f))
             {
                 float angle = Vector3.Angle(Vector3.up, slopeHit.normal);
-                if (angle > Rigidbody.GetComponent<Collider>().material.staticFriction || angle == 0) return false;
+                if (angle > CharacterController.slopeLimit || angle == 0) return false;
                 Vector3 slopeDirection = Vector3.ProjectOnPlane(Vector3.down, slopeHit.normal).normalized;
-                Vector3 movementDirection = new Vector3(Rigidbody.linearVelocity.x, 0, Rigidbody.linearVelocity.z).normalized;
+                Vector3 movementDirection = new Vector3(CharacterController.velocity.x, 0, CharacterController.velocity.z).normalized;
                 float dotProduct = Vector3.Dot(movementDirection, slopeDirection);
                 return dotProduct > 0;
             }
@@ -461,6 +438,34 @@ namespace CluckStorm.Player
             }
         }
 
+        private void GravityAndJump()
+        {
+            bool wasPreviouslyGrounded = IsGrounded;
+            IsGrounded = CharacterController.isGrounded;
+
+            if (!IsGrounded)
+            {
+                jumpVelocity.y -= gravitationalForce * Time.deltaTime;
+                return; 
+            }
+
+            if (!wasPreviouslyGrounded) audioSource.PlayOneShot(landingAudioClip);
+
+            if (!canJump)
+            {
+                jumpVelocity.y = -1f;
+                return;
+            }
+
+            if (inputManager.haveJumped && 
+                MovementState != PlayerMovementState.Crouching &&
+                MovementState != PlayerMovementState.Sliding)
+            {
+                jumpVelocity.y = Mathf.Sqrt(jumpHeight * 2f * gravitationalForce);
+                if (wasPreviouslyGrounded) audioSource.PlayOneShot(jumpingAudioClip);
+            }
+            else if (!IsGrounded && jumpVelocity.y < 0f) jumpVelocity.y = -1f;
+        }
         #region Sound Management
         private void DetectSurfaceAndMovement()
         {
@@ -540,18 +545,6 @@ namespace CluckStorm.Player
                 }
             }
         }
-        
-        void OnCollisionEnter(Collision collision)
-        {
-            if (!canPush) return;
-
-            Rigidbody body = collision.collider.attachedRigidbody;
-            if (body == null || body.isKinematic) return;
-
-            Vector3 pushDir = new Vector3(collision.contacts[0].normal.x, 0, collision.contacts[0].normal.z);
-            body.linearVelocity = pushDir * pushStrength;
-        }
-
 
         #endregion
     }
